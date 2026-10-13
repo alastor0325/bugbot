@@ -13,6 +13,10 @@ DEFAULT_API_URL = "https://hackbot-api.moz.tools"
 
 TIMEOUT = 60
 
+# How many times start_or_retry_agent_run re-posts work whose key is held by a
+# failed run, under the same key with `:r2`, then `:r3` appended.
+RETRY_LIMIT = 2
+
 
 def api_url() -> str:
     """The hackbot API base URL.
@@ -99,3 +103,35 @@ def trigger_agent_run(agent: str, inputs: dict, dedupe_key: str | None = None) -
         tell the two apart.
     """
     return start_agent_run(agent, inputs, dedupe_key).run_id
+
+
+def get_run_status(run_id: str) -> str:
+    """The status of a run: pending, running, succeeded, failed or timed_out."""
+    response = requests.get(
+        f"{_base_url()}/runs/{run_id}", headers=_headers(), timeout=TIMEOUT
+    )
+    response.raise_for_status()
+
+    return response.json()["status"]
+
+
+def start_or_retry_agent_run(agent: str, inputs: dict, dedupe_key: str) -> AgentRun:
+    """Start a run under ``dedupe_key``, stepping past runs that failed holding it.
+
+    A key stays with its run whatever becomes of it, so a run that failed would
+    block the same work until the key changed. When the key is held by a run
+    whose status is ``failed``, the work is posted again under the key with
+    ``:r2`` appended, then ``:r3``, and no further: a third failure is left for a
+    human. A key held by any other run (pending, running, succeeded or timed
+    out) returns that run as is.
+
+    Returns:
+        The run that ended the search, new or existing. ``created`` is False when
+        every key tried was already held.
+    """
+    run = start_agent_run(agent, inputs, dedupe_key)
+    for attempt in range(2, RETRY_LIMIT + 2):
+        if run.created or get_run_status(run.run_id) != "failed":
+            break
+        run = start_agent_run(agent, inputs, f"{dedupe_key}:r{attempt}")
+    return run
