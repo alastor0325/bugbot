@@ -57,6 +57,7 @@ class CheckWikiPage:
         "accessibilitybug.py",
         "performancebug.py",
         "frontend_triage.py",  # piloting on a few components before documenting it
+        "gecko_triage.py",  # piloting with one team before documenting it
     }
 
     def __init__(self) -> None:

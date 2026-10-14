@@ -69,6 +69,9 @@ python -m bugbot.rules.spambug --production
 # Send newly filed frontend bugs to the frontend-triage agent
 python -m bugbot.rules.frontend_triage --production
 
+# Send each team's changed and stale-needinfo bugs to the gecko-triage agent
+python -m bugbot.rules.gecko_triage --production
+
 # Suggest components for untriaged bugs (hourly, list only bugs on which we acted)
 python -m bugbot.rules.component --frequency hourly --production
 

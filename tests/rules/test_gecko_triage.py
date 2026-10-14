@@ -1,0 +1,268 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this file,
+# You can obtain one at http://mozilla.org/MPL/2.0/.
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from bugbot.hackbot_utils import AgentRun
+from bugbot.rules.gecko_triage import (
+    AGENT,
+    HACKBOT_EMAIL,
+    STALE_NEEDINFO_DAYS,
+    TEAMS,
+    GeckoTriage,
+    Settings,
+    dedupe_key,
+    hours_since,
+    is_due,
+    load_last_run,
+    save_last_run,
+    last_whiteboard_editor,
+    parse_settings,
+)
+
+NOW = datetime(2026, 10, 15, 13, 30, tzinfo=timezone.utc)
+OWNER = "owner@example.org"
+
+
+def _rule(team="media", **over):
+    rule = GeckoTriage(team)
+    for key, value in over.items():
+        setattr(rule, key, value)
+    return rule
+
+
+LAST_CHANGE = "2026-10-15T10:00:00Z"
+
+
+def _bug(bug_id=1, creator="reporter@example.org"):
+    return {
+        "id": bug_id,
+        "last_change_time": LAST_CHANGE,
+        "summary": "Video freezes",
+        "creator": creator,
+        "product": "Core",
+        "component": "Audio/Video: Playback",
+        "groups": [],
+    }
+
+
+# --- the settings bug -------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("whiteboard", "expected"),
+    [
+        ("[gecko-triage mode:auto every:12h]", Settings("auto", 12)),
+        ("[x][Gecko-Triage MODE:Manual every:2d]", Settings("manual", 48)),
+        ("[gecko-triage]", Settings("manual", 24)),
+        ("[gecko-triage every:12h unknown:1]", Settings("manual", 12)),
+    ],
+)
+def test_a_valid_tag_by_an_allowlisted_editor_is_read(whiteboard, expected):
+    assert parse_settings(whiteboard, OWNER, {OWNER}, 24) == expected
+
+
+@pytest.mark.parametrize(
+    "whiteboard",
+    [
+        "",
+        "[gecko-triage mode:fast]",
+        "[gecko-triage every:0h]",
+        "[gecko-triage every:8d]",
+        "[gecko-triage every:12]",
+        "[media-triage mode:auto]",
+    ],
+)
+def test_anything_else_falls_back_to_manual_and_the_default(whiteboard):
+    assert parse_settings(whiteboard, OWNER, {OWNER}, 24) == Settings("manual", 24)
+
+
+def test_an_edit_by_anyone_else_falls_back():
+    tag = "[gecko-triage mode:auto every:1h]"
+    assert parse_settings(tag, "someone@example.org", {OWNER}, 24) == Settings(
+        "manual", 24
+    )
+    assert parse_settings(tag, "Owner@Example.org", {OWNER}, 24) == Settings("auto", 1)
+
+
+def test_the_last_whiteboard_editor_comes_from_history_or_the_creator():
+    history = [
+        {"who": "a@example.org", "changes": [{"field_name": "whiteboard"}]},
+        {"who": "b@example.org", "changes": [{"field_name": "priority"}]},
+    ]
+    assert last_whiteboard_editor(history, "creator@example.org") == "a@example.org"
+    assert last_whiteboard_editor([], "creator@example.org") == "creator@example.org"
+
+
+def test_a_team_without_a_settings_bug_runs_manual_every_day():
+    assert _rule().settings() == Settings("manual", 24)
+
+
+# --- when the rule acts, and the dedupe key ----------------------------------- #
+
+
+def test_the_rule_is_due_on_its_first_run_and_after_the_interval():
+    assert is_due(None, NOW, 24)
+    assert not is_due(NOW - timedelta(hours=23), NOW, 24)
+    assert is_due(NOW - timedelta(hours=24), NOW, 24)
+
+
+def test_hours_since_rounds_up_and_falls_back_to_the_interval():
+    assert hours_since(NOW - timedelta(hours=5, minutes=1), NOW, 24) == 6
+    assert hours_since(None, NOW, 24) == 24
+
+
+def test_one_key_per_bug_team_and_change():
+    key = dedupe_key("media", 1, "2026-10-15T10:00:00Z")
+    assert key == dedupe_key("media", 1, "2026-10-15T10:00:00Z")
+    assert key != dedupe_key("media", 2, "2026-10-15T10:00:00Z")
+    assert key != dedupe_key("gfx", 1, "2026-10-15T10:00:00Z")
+    assert key != dedupe_key("media", 1, "2026-10-15T11:00:00Z")
+
+
+# --- which bugs are picked ---------------------------------------------------- #
+
+
+def _values(params):
+    return [v for k, v in params.items() if k.startswith("v")]
+
+
+def test_queries_every_team_component_with_its_product():
+    params = _rule().query(6)
+    values = _values(params)
+    for product, component in TEAMS["media"].components:
+        assert product in values and component in values
+
+
+def test_queries_open_defects_only():
+    params = _rule().query(6)
+    assert params["resolution"] == "---"
+    assert params["bug_type"] == "defect"
+
+
+def test_queries_bugs_changed_since_the_last_run_or_on_a_stale_bot_needinfo():
+    params = _rule().query(6)
+    values = _values(params)
+    # BMO misreads an ISO time with `T` and `Z`; a relative value has no time zone.
+    assert "-6h" in values
+    assert HACKBOT_EMAIL in values
+    assert f"-{STALE_NEEDINFO_DAYS}d" in values
+    # BMO allows AND_G only on one field, so the two flag conditions are a plain
+    # AND; the agent's preflight checks the stale needinfo exactly.
+    assert "AND_G" not in params.values()
+
+
+def test_keeps_a_bot_filed_bug():
+    # Crash and fuzzing bugs are filed by bots and still need severity and priority.
+    assert _rule().handle_bug(_bug(creator="bot@mozilla.tld"), {}) is not None
+
+
+def test_an_unknown_team_is_refused():
+    with pytest.raises(KeyError):
+        GeckoTriage("nope")
+
+
+# --- starting runs ------------------------------------------------------------ #
+
+
+@pytest.fixture
+def started(monkeypatch):
+    calls = []
+
+    def fake_start(agent, inputs, key):
+        calls.append((agent, inputs, key))
+        return AgentRun(run_id=f"run-{inputs['bug_id']}", created=True)
+
+    monkeypatch.setattr("bugbot.rules.gecko_triage.start_or_retry_agent_run", fake_start)
+    return calls
+
+
+def _bugs(*ids):
+    return {str(i): _bug(i) for i in ids}
+
+
+def test_starts_one_run_per_bug_with_the_team(started):
+    _rule(dryrun=False).trigger_runs(_bugs(1, 2))
+    assert [(a, i) for a, i, _ in started] == [
+        (AGENT, {"bug_id": 1, "team": "media"}),
+        (AGENT, {"bug_id": 2, "team": "media"}),
+    ]
+    assert started[0][2] == dedupe_key("media", 1, LAST_CHANGE)
+
+
+def test_dry_run_starts_nothing(started):
+    bugs = _rule(dryrun=True).trigger_runs(_bugs(1))
+    assert started == [] and set(bugs) == {"1"}
+
+
+def test_caps_the_number_of_new_runs(started):
+    rule = _rule(dryrun=False, max_triggers=1)
+    bugs = rule.trigger_runs(_bugs(1, 2, 3))
+    assert len(started) == 1 and set(bugs) == {"1"}
+    assert rule.left_for_next_run == 2
+
+
+def test_a_bug_whose_run_exists_is_not_left_for_next_run(monkeypatch):
+    monkeypatch.setattr(
+        "bugbot.rules.gecko_triage.start_or_retry_agent_run",
+        lambda agent, inputs, key: AgentRun(run_id="old", created=False),
+    )
+    rule = _rule(dryrun=False)
+    rule.trigger_runs(_bugs(1, 2))
+    assert rule.left_for_next_run == 0
+
+
+def test_an_existing_run_is_not_reported_again(monkeypatch):
+    monkeypatch.setattr(
+        "bugbot.rules.gecko_triage.start_or_retry_agent_run",
+        lambda agent, inputs, key: AgentRun(run_id="old", created=False),
+    )
+    bugs = _rule(dryrun=False).trigger_runs(_bugs(1))
+    assert bugs == {}
+
+
+def test_a_failing_start_does_not_stop_the_others(monkeypatch):
+    def flaky(agent, inputs, key):
+        if inputs["bug_id"] == 1:
+            raise RuntimeError("boom")
+        return AgentRun(run_id="run-2", created=True)
+
+    monkeypatch.setattr("bugbot.rules.gecko_triage.start_or_retry_agent_run", flaky)
+    bugs = _rule(dryrun=False).trigger_runs(_bugs(1, 2))
+    assert set(bugs) == {"2"}
+
+
+def test_the_last_run_is_kept_per_team(tmp_path, monkeypatch):
+    monkeypatch.setattr("bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json")
+    assert load_last_run("media") is None
+    save_last_run("media", NOW)
+    assert load_last_run("media") == NOW
+    assert load_last_run("gfx") is None
+
+
+def test_the_last_change_time_reaches_trigger_runs():
+    # `bughandler` keeps only id/summary/product/component, so the dedupe key's
+    # field has to be carried over by hand.
+    rule = _rule(dryrun=True)
+    rule.cache.set_dry_run(True)
+    data: dict = {}
+    rule.bughandler(_bug(), data)
+    assert data["1"]["last_change_time"] == LAST_CHANGE
+    assert set(rule.columns()) <= set(data["1"]) | {"run_id"}
+
+
+@pytest.mark.parametrize(("left", "saved"), [(0, True), (3, False)])
+def test_the_last_run_moves_on_only_when_nothing_is_left(tmp_path, monkeypatch, left, saved):
+    # Bugs over the cap must come back on the next cron, so the window stays open.
+    monkeypatch.setattr("bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json")
+
+    def fake_run(self):
+        self.left_for_next_run = left
+
+    monkeypatch.setattr("bugbot.bzcleaner.BzCleaner.run", fake_run)
+    rule = _rule(dryrun=False)
+    rule.run()
+    assert (load_last_run("media") is not None) == saved
