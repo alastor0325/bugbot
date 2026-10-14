@@ -62,7 +62,9 @@ def hours_since(last_run: datetime | None, now: datetime, every_hours: int) -> i
     return max(1, math.ceil((now - last_run).total_seconds() / 3600))
 
 
-def dedupe_key(team: str, bug_id: int, last_change_time: str, stale: bool = False) -> str:
+def dedupe_key(
+    team: str, bug_id: int, last_change_time: str, stale: bool = False
+) -> str:
     """One run per state of a bug: a bug that has not changed since its last run is
     not run again, however often the query returns it.
 
@@ -80,9 +82,9 @@ def has_stale_bot_needinfo(bug: dict, now: datetime) -> bool:
         if flag.get("setter") != HACKBOT_EMAIL:
             continue
         set_at = flag.get("creation_date")
-        if set_at and now - datetime.fromisoformat(set_at.replace("Z", "+00:00")) >= timedelta(
-            days=STALE_NEEDINFO_DAYS
-        ):
+        if set_at and now - datetime.fromisoformat(
+            set_at.replace("Z", "+00:00")
+        ) >= timedelta(days=STALE_NEEDINFO_DAYS):
             return True
     return False
 
@@ -134,6 +136,7 @@ class GeckoTriage(BzCleaner):
         super().__init__()
         self.max_triggers = self.get_config("max_triggers", 20)
         self.every_hours = self.get_config("every_hours", 24)
+        self.now = datetime.now(timezone.utc)
         self.left_for_next_run = 0
 
     def description(self):
@@ -191,7 +194,7 @@ class GeckoTriage(BzCleaner):
         # dedupe key needs is carried over by hand.
         data[str(bug["id"])] = {
             "last_change_time": bug["last_change_time"],
-            "stale": has_stale_bot_needinfo(bug, datetime.now(timezone.utc)),
+            "stale": has_stale_bot_needinfo(bug, self.now),
         }
         return bug
 

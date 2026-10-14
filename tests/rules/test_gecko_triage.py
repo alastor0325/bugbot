@@ -230,7 +230,9 @@ def test_the_last_run_moves_on_only_when_nothing_is_left(
 
 def test_a_failed_run_keeps_the_window_open(tmp_path, monkeypatch):
     # BzCleaner.run logs and swallows errors, so a failure must not move the window.
-    monkeypatch.setattr("bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json")
+    monkeypatch.setattr(
+        "bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json"
+    )
     monkeypatch.setattr("bugbot.bzcleaner.BzCleaner.run", lambda self: None)
     _rule(dryrun=False).run()
     assert load_last_run("media") is None
@@ -243,7 +245,7 @@ def _with_needinfo(bug, setter, when):
 
 def test_a_stale_bot_needinfo_gets_its_own_key():
     # The run that set the needinfo already used the bug's current change time.
-    rule = _rule()
+    rule = _rule(now=NOW)
     stale = _with_needinfo(_bug(), HACKBOT_EMAIL, "2026-09-01T10:00:00Z")
     data: dict = {}
     rule.handle_bug(stale, data)
@@ -255,7 +257,9 @@ def test_a_stale_bot_needinfo_gets_its_own_key():
     rule.handle_bug(other, data)
     assert data["1"]["stale"] is False
     assert dedupe_key("media", 1, LAST_CHANGE, stale=True).endswith(":stale")
-    assert dedupe_key("media", 1, LAST_CHANGE) != dedupe_key("media", 1, LAST_CHANGE, stale=True)
+    assert dedupe_key("media", 1, LAST_CHANGE) != dedupe_key(
+        "media", 1, LAST_CHANGE, stale=True
+    )
 
 
 def test_a_stale_bug_is_started_under_the_stale_key(started):
