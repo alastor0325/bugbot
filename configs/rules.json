@@ -426,7 +426,8 @@
   },
   "gecko_triage": {
     "max_days_in_cache": 0,
-    "max_triggers": 20
+    "max_triggers": 20,
+    "every_hours": 24
   },
   "performancebug": {
     "max_days_in_cache": 7,

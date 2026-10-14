@@ -5,11 +5,8 @@
 import json
 import math
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-
-from libmozdata.bugzilla import Bugzilla
 
 from bugbot import logger, utils
 from bugbot.bzcleaner import BzCleaner
@@ -24,12 +21,6 @@ HACKBOT_EMAIL = "hackbot@mozilla.tld"
 # agent uses the same value (bugbug's agents/gecko-triage config.py).
 STALE_NEEDINFO_DAYS = 14
 
-# The settings tag on a team's settings bug: `[gecko-triage mode:… every:…]`.
-_TAG = re.compile(r"\[gecko-triage((?:\s+[a-z]+:[a-z0-9]+)*)\s*\]", re.IGNORECASE)
-_EVERY = re.compile(r"(\d+)([hd])")
-MAX_EVERY_HOURS = 7 * 24
-
-
 @dataclass(frozen=True)
 class Team:
     """One team the agent triages for.
@@ -41,9 +32,6 @@ class Team:
     """
 
     components: tuple[tuple[str, str], ...]
-    settings_bug: int | None
-    allowlist: frozenset[str]
-    default_every_hours: int = 24
 
 
 TEAMS = {
@@ -58,58 +46,8 @@ TEAMS = {
             ("Core", "Web Audio"),
             ("Core", "Audio/Video: Web Codecs"),
         ),
-        settings_bug=None,
-        allowlist=frozenset({"alwu@mozilla.com"}),
     ),
 }
-
-
-@dataclass(frozen=True)
-class Settings:
-    mode: str
-    every_hours: int
-
-
-def parse_settings(
-    whiteboard: str, editor: str | None, allowlist: frozenset[str], default_every: int
-) -> Settings:
-    """The mode and interval from a settings bug's whiteboard.
-
-    Anything malformed, missing or edited by someone off the allowlist falls back to
-    `mode:manual` and the default interval. One bad key makes the whole tag invalid.
-    The agent reads the same tag the same way (bugbug's gecko_triage/settings.py).
-    """
-    fallback = Settings("manual", default_every)
-    if not editor or editor.lower() not in {a.lower() for a in allowlist}:
-        return fallback
-    match = _TAG.search(whiteboard or "")
-    if not match:
-        return fallback
-    values: dict[str, str] = {}
-    for token in match.group(1).split():
-        key, _, value = token.lower().partition(":")
-        values.setdefault(key, value)
-    mode = values.get("mode", "manual")
-    if mode not in ("manual", "auto"):
-        return fallback
-    every = default_every
-    if "every" in values:
-        parsed = _EVERY.fullmatch(values["every"])
-        if not parsed:
-            return fallback
-        every = int(parsed.group(1)) * (24 if parsed.group(2) == "d" else 1)
-        if not 1 <= every <= MAX_EVERY_HOURS:
-            return fallback
-    return Settings(mode, every)
-
-
-def last_whiteboard_editor(history: list[dict], creator: str | None) -> str | None:
-    """Who changed the whiteboard last: the newest history entry with a whiteboard
-    change, else the bug's creator, who set it at filing."""
-    for entry in reversed(history):
-        if any(c.get("field_name") == "whiteboard" for c in entry.get("changes", ())):
-            return entry.get("who")
-    return creator
 
 
 def is_due(last_run: datetime | None, now: datetime, every_hours: int) -> bool:
@@ -159,8 +97,8 @@ def save_last_run(team: str, when: datetime) -> None:
 class GeckoTriage(BzCleaner):
     """Ask hackbot's gecko-triage agent to triage one team's bugs.
 
-    Runs from the hourly cron but acts only when the interval from the team's
-    settings bug has passed since its last run. It then picks the open defects in the
+    Runs from the hourly cron but acts only when `every_hours` (configs/rules.json)
+    have passed since its last run. It then picks the open defects in the
     team's components that changed since that run, or that wait on a needinfo the
     agent set and has gone stale. The dedupe key keeps one run per state of a bug.
 
@@ -175,6 +113,7 @@ class GeckoTriage(BzCleaner):
         self.team = TEAMS[team]
         super().__init__()
         self.max_triggers = self.get_config("max_triggers", 20)
+        self.every_hours = self.get_config("every_hours", 24)
         self.left_for_next_run = 0
 
     def description(self):
@@ -188,39 +127,6 @@ class GeckoTriage(BzCleaner):
 
     def has_product_component(self):
         return True
-
-    def settings(self) -> Settings:
-        fallback = Settings("manual", self.team.default_every_hours)
-        if self.team.settings_bug is None:
-            return fallback
-        data: dict = {}
-
-        def bughandler(bug, data):
-            data["whiteboard"] = bug.get("whiteboard", "")
-            data["creator"] = bug.get("creator")
-
-        def historyhandler(bug, data):
-            data["history"] = bug.get("history", [])
-
-        try:
-            Bugzilla(
-                [self.team.settings_bug],
-                include_fields=["id", "whiteboard", "creator"],
-                bughandler=bughandler,
-                bugdata=data,
-                historyhandler=historyhandler,
-                historydata=data,
-            ).get_data().wait()
-        except Exception:
-            logger.exception("Cannot read settings bug %s", self.team.settings_bug)
-            return fallback
-        editor = last_whiteboard_editor(data.get("history", []), data.get("creator"))
-        return parse_settings(
-            data.get("whiteboard", ""),
-            editor,
-            self.team.allowlist,
-            self.team.default_every_hours,
-        )
 
     def query(self, since_hours: int) -> dict:
         params = {
@@ -259,7 +165,7 @@ class GeckoTriage(BzCleaner):
 
     def get_bz_params(self, date):
         return self.query(
-            hours_since(self.last_run, self.now, self.current.every_hours)
+            hours_since(self.last_run, self.now, self.every_hours)
         )
 
     def handle_bug(self, bug, data):
@@ -275,9 +181,8 @@ class GeckoTriage(BzCleaner):
 
     def run(self):
         self.now = datetime.now(timezone.utc)
-        self.current = self.settings()
         self.last_run = load_last_run(self.team_name)
-        if not is_due(self.last_run, self.now, self.current.every_hours):
+        if not is_due(self.last_run, self.now, self.every_hours):
             logger.info("%s (%s) is not due yet", AGENT, self.team_name)
             return
         super().run()

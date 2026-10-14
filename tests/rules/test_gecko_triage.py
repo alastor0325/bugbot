@@ -13,18 +13,14 @@ from bugbot.rules.gecko_triage import (
     STALE_NEEDINFO_DAYS,
     TEAMS,
     GeckoTriage,
-    Settings,
     dedupe_key,
     hours_since,
     is_due,
     load_last_run,
     save_last_run,
-    last_whiteboard_editor,
-    parse_settings,
 )
 
 NOW = datetime(2026, 10, 15, 13, 30, tzinfo=timezone.utc)
-OWNER = "owner@example.org"
 
 
 def _rule(team="media", **over):
@@ -49,56 +45,11 @@ def _bug(bug_id=1, creator="reporter@example.org"):
     }
 
 
-# --- the settings bug -------------------------------------------------------- #
+# --- the interval ------------------------------------------------------------ #
 
 
-@pytest.mark.parametrize(
-    ("whiteboard", "expected"),
-    [
-        ("[gecko-triage mode:auto every:12h]", Settings("auto", 12)),
-        ("[x][Gecko-Triage MODE:Manual every:2d]", Settings("manual", 48)),
-        ("[gecko-triage]", Settings("manual", 24)),
-        ("[gecko-triage every:12h unknown:1]", Settings("manual", 12)),
-    ],
-)
-def test_a_valid_tag_by_an_allowlisted_editor_is_read(whiteboard, expected):
-    assert parse_settings(whiteboard, OWNER, {OWNER}, 24) == expected
-
-
-@pytest.mark.parametrize(
-    "whiteboard",
-    [
-        "",
-        "[gecko-triage mode:fast]",
-        "[gecko-triage every:0h]",
-        "[gecko-triage every:8d]",
-        "[gecko-triage every:12]",
-        "[media-triage mode:auto]",
-    ],
-)
-def test_anything_else_falls_back_to_manual_and_the_default(whiteboard):
-    assert parse_settings(whiteboard, OWNER, {OWNER}, 24) == Settings("manual", 24)
-
-
-def test_an_edit_by_anyone_else_falls_back():
-    tag = "[gecko-triage mode:auto every:1h]"
-    assert parse_settings(tag, "someone@example.org", {OWNER}, 24) == Settings(
-        "manual", 24
-    )
-    assert parse_settings(tag, "Owner@Example.org", {OWNER}, 24) == Settings("auto", 1)
-
-
-def test_the_last_whiteboard_editor_comes_from_history_or_the_creator():
-    history = [
-        {"who": "a@example.org", "changes": [{"field_name": "whiteboard"}]},
-        {"who": "b@example.org", "changes": [{"field_name": "priority"}]},
-    ]
-    assert last_whiteboard_editor(history, "creator@example.org") == "a@example.org"
-    assert last_whiteboard_editor([], "creator@example.org") == "creator@example.org"
-
-
-def test_a_team_without_a_settings_bug_runs_manual_every_day():
-    assert _rule().settings() == Settings("manual", 24)
+def test_the_interval_comes_from_the_rule_config():
+    assert _rule().every_hours == 24
 
 
 # --- when the rule acts, and the dedupe key ----------------------------------- #
