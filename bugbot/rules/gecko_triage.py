@@ -62,10 +62,29 @@ def hours_since(last_run: datetime | None, now: datetime, every_hours: int) -> i
     return max(1, math.ceil((now - last_run).total_seconds() / 3600))
 
 
-def dedupe_key(team: str, bug_id: int, last_change_time: str) -> str:
+def dedupe_key(team: str, bug_id: int, last_change_time: str, stale: bool = False) -> str:
     """One run per state of a bug: a bug that has not changed since its last run is
-    not run again, however often the query returns it."""
-    return f"{AGENT}:{team}:{bug_id}:{last_change_time}"
+    not run again, however often the query returns it.
+
+    A stale needinfo is a new state with no new change time (the run that set the
+    needinfo already used it), so it gets its own key.
+    """
+    key = f"{AGENT}:{team}:{bug_id}:{last_change_time}"
+    return f"{key}:stale" if stale else key
+
+
+def has_stale_bot_needinfo(bug: dict, now: datetime) -> bool:
+    for flag in bug.get("flags") or ():
+        if flag.get("name") != "needinfo" or flag.get("status") != "?":
+            continue
+        if flag.get("setter") != HACKBOT_EMAIL:
+            continue
+        set_at = flag.get("creation_date")
+        if set_at and now - datetime.fromisoformat(set_at.replace("Z", "+00:00")) >= timedelta(
+            days=STALE_NEEDINFO_DAYS
+        ):
+            return True
+    return False
 
 
 def state_path() -> str:
@@ -131,7 +150,7 @@ class GeckoTriage(BzCleaner):
 
     def query(self, since_hours: int) -> dict:
         params = {
-            "include_fields": ["id", "summary", "last_change_time"],
+            "include_fields": ["id", "summary", "last_change_time", "flags"],
             "bug_type": "defect",
             "resolution": "---",
         }
@@ -170,7 +189,10 @@ class GeckoTriage(BzCleaner):
     def handle_bug(self, bug, data):
         # `bughandler` rebuilds each row from id and summary, so the field the
         # dedupe key needs is carried over by hand.
-        data[str(bug["id"])] = {"last_change_time": bug["last_change_time"]}
+        data[str(bug["id"])] = {
+            "last_change_time": bug["last_change_time"],
+            "stale": has_stale_bot_needinfo(bug, datetime.now(timezone.utc)),
+        }
         return bug
 
     def get_bugs(self, date="today", bug_ids=[], chunk_size=None):
@@ -184,10 +206,11 @@ class GeckoTriage(BzCleaner):
         if not is_due(self.last_run, self.now, self.every_hours):
             logger.info("%s (%s) is not due yet", AGENT, self.team_name)
             return
+        self.completed = False
         super().run()
-        # Bugs left over the cap must come back on the next cron, so the window only
-        # moves on once every bug in it has a run.
-        if not self.dryrun and not self.left_for_next_run:
+        # BzCleaner.run logs and swallows errors, and bugs left over the cap must come
+        # back on the next cron, so the window only moves on after a complete pass.
+        if not self.dryrun and self.completed and not self.left_for_next_run:
             save_last_run(self.team_name, self.now)
 
     def trigger_runs(self, bugs: dict) -> dict:
@@ -222,7 +245,12 @@ class GeckoTriage(BzCleaner):
                 )
                 self.left_for_next_run = failed + len(items) - index
                 return started
-            key = dedupe_key(self.team_name, int(bugid), bug["last_change_time"])
+            key = dedupe_key(
+                self.team_name,
+                int(bugid),
+                bug["last_change_time"],
+                stale=bug.get("stale", False),
+            )
             try:
                 run = start_or_retry_agent_run(
                     AGENT, {"bug_id": int(bugid), "team": self.team_name}, key
@@ -236,6 +264,7 @@ class GeckoTriage(BzCleaner):
                 started[bugid] = bug
 
         self.left_for_next_run = failed
+        self.completed = True
         return started
 
     def get_extra_for_template(self):

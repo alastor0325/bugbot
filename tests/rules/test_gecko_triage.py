@@ -219,9 +219,47 @@ def test_the_last_run_moves_on_only_when_nothing_is_left(
     )
 
     def fake_run(self):
+        self.completed = True
         self.left_for_next_run = left
 
     monkeypatch.setattr("bugbot.bzcleaner.BzCleaner.run", fake_run)
     rule = _rule(dryrun=False)
     rule.run()
     assert (load_last_run("media") is not None) == saved
+
+
+def test_a_failed_run_keeps_the_window_open(tmp_path, monkeypatch):
+    # BzCleaner.run logs and swallows errors, so a failure must not move the window.
+    monkeypatch.setattr("bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json")
+    monkeypatch.setattr("bugbot.bzcleaner.BzCleaner.run", lambda self: None)
+    _rule(dryrun=False).run()
+    assert load_last_run("media") is None
+
+
+def _with_needinfo(bug, setter, when):
+    flag = {"name": "needinfo", "status": "?", "setter": setter, "creation_date": when}
+    return dict(bug, flags=[flag])
+
+
+def test_a_stale_bot_needinfo_gets_its_own_key():
+    # The run that set the needinfo already used the bug's current change time.
+    rule = _rule()
+    stale = _with_needinfo(_bug(), HACKBOT_EMAIL, "2026-09-01T10:00:00Z")
+    data: dict = {}
+    rule.handle_bug(stale, data)
+    assert data["1"]["stale"] is True
+    fresh = _with_needinfo(_bug(), HACKBOT_EMAIL, "2026-10-14T10:00:00Z")
+    rule.handle_bug(fresh, data)
+    assert data["1"]["stale"] is False
+    other = _with_needinfo(_bug(), "someone@example.org", "2026-09-01T10:00:00Z")
+    rule.handle_bug(other, data)
+    assert data["1"]["stale"] is False
+    assert dedupe_key("media", 1, LAST_CHANGE, stale=True).endswith(":stale")
+    assert dedupe_key("media", 1, LAST_CHANGE) != dedupe_key("media", 1, LAST_CHANGE, stale=True)
+
+
+def test_a_stale_bug_is_started_under_the_stale_key(started):
+    bugs = _bugs(1)
+    bugs["1"]["stale"] = True
+    _rule(dryrun=False).trigger_runs(bugs)
+    assert started[0][2] == dedupe_key("media", 1, LAST_CHANGE, stale=True)
