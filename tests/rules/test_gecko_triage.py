@@ -127,7 +127,9 @@ def started(monkeypatch):
         calls.append((agent, inputs, key))
         return AgentRun(run_id=f"run-{inputs['bug_id']}", created=True)
 
-    monkeypatch.setattr("bugbot.rules.gecko_triage.start_or_retry_agent_run", fake_start)
+    monkeypatch.setattr(
+        "bugbot.rules.gecko_triage.start_or_retry_agent_run", fake_start
+    )
     return calls
 
 
@@ -187,7 +189,9 @@ def test_a_failing_start_does_not_stop_the_others(monkeypatch):
 
 
 def test_the_last_run_is_kept_per_team(tmp_path, monkeypatch):
-    monkeypatch.setattr("bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json")
+    monkeypatch.setattr(
+        "bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json"
+    )
     assert load_last_run("media") is None
     save_last_run("media", NOW)
     assert load_last_run("media") == NOW
@@ -206,9 +210,13 @@ def test_the_last_change_time_reaches_trigger_runs():
 
 
 @pytest.mark.parametrize(("left", "saved"), [(0, True), (3, False)])
-def test_the_last_run_moves_on_only_when_nothing_is_left(tmp_path, monkeypatch, left, saved):
+def test_the_last_run_moves_on_only_when_nothing_is_left(
+    tmp_path, monkeypatch, left, saved
+):
     # Bugs over the cap must come back on the next cron, so the window stays open.
-    monkeypatch.setattr("bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json")
+    monkeypatch.setattr(
+        "bugbot.rules.gecko_triage.state_path", lambda: tmp_path / "s.json"
+    )
 
     def fake_run(self):
         self.left_for_next_run = left

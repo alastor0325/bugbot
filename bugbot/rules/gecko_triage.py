@@ -21,6 +21,7 @@ HACKBOT_EMAIL = "hackbot@mozilla.tld"
 # agent uses the same value (bugbug's agents/gecko-triage config.py).
 STALE_NEEDINFO_DAYS = 14
 
+
 @dataclass(frozen=True)
 class Team:
     """One team the agent triages for.
@@ -164,9 +165,7 @@ class GeckoTriage(BzCleaner):
         return params
 
     def get_bz_params(self, date):
-        return self.query(
-            hours_since(self.last_run, self.now, self.every_hours)
-        )
+        return self.query(hours_since(self.last_run, self.now, self.every_hours))
 
     def handle_bug(self, bug, data):
         # `bughandler` rebuilds each row from id and summary, so the field the
