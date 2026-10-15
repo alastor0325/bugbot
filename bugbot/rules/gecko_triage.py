@@ -14,10 +14,7 @@ from bugbot.hackbot_utils import api_url, start_or_retry_agent_run
 
 AGENT = "gecko-triage"
 
-# Every hackbot agent comments as this account and sets its needinfos from it.
-HACKBOT_EMAIL = "hackbot@mozilla.tld"
-
-# A needinfo the agent set is stale after this long with no change to the bug. The
+# A needinfo on the reporter is stale after this long with no change to the bug. The
 # agent uses the same value (bugbug's agents/gecko-triage config.py).
 STALE_NEEDINFO_DAYS = 14
 
@@ -75,24 +72,16 @@ def dedupe_key(
     return f"{key}:stale" if stale else key
 
 
-def bot_setters(env=os.environ) -> tuple[str, ...]:
-    """The accounts whose needinfos are the agent's: hackbot and the `BOT_ALIASES`.
-
-    `BOT_ALIASES` holds comma-separated logins of a temporary account that posted the
-    agent's results, such as a team bot in a pilot. It stays out of the repo, as in the
-    agent (bugbug's agents/gecko-triage config.py).
-    """
-    aliases = (a.strip().lower() for a in env.get("BOT_ALIASES", "").split(","))
-    return (HACKBOT_EMAIL, *(a for a in aliases if a))
-
-
-def has_stale_bot_needinfo(
-    bug: dict, now: datetime, setters: tuple[str, ...] = (HACKBOT_EMAIL,)
-) -> bool:
+def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
+    """Whether the bug has an open needinfo on its reporter older than
+    STALE_NEEDINFO_DAYS, whoever set it."""
+    reporter = str(bug.get("creator", "")).lower()
+    if not reporter:
+        return False
     for flag in bug.get("flags") or ():
         if flag.get("name") != "needinfo" or flag.get("status") != "?":
             continue
-        if str(flag.get("setter", "")).lower() not in setters:
+        if str(flag.get("requestee", "")).lower() != reporter:
             continue
         set_at = flag.get("creation_date")
         if set_at and now - datetime.fromisoformat(
@@ -134,8 +123,8 @@ class GeckoTriage(BzCleaner):
 
     Runs from the hourly cron but acts only when `every_hours` (configs/rules.json)
     have passed since its last run. It then picks the open defects in the
-    team's components that changed since that run, or that wait on a needinfo the
-    agent set and has gone stale. The dedupe key keeps one run per state of a bug.
+    team's components that changed since that run, or that wait on a needinfo on the
+    reporter that has gone stale, whoever set it. The dedupe key keeps one run per state of a bug.
 
     The agent's own comment also changes the bug, so the next interval picks the bug
     again; the agent's preflight then ends that run at no model cost.
@@ -151,7 +140,6 @@ class GeckoTriage(BzCleaner):
         self.every_hours = self.get_config("every_hours", 24)
         self.now = datetime.now(timezone.utc)
         self.left_for_next_run = 0
-        self.setters = bot_setters()
 
     def description(self):
         return f"[Using AI] Bugs sent to the gecko-triage agent for the {self.team_name} team"
@@ -167,7 +155,7 @@ class GeckoTriage(BzCleaner):
 
     def query(self, since_hours: int) -> dict:
         params = {
-            "include_fields": ["id", "summary", "last_change_time", "flags"],
+            "include_fields": ["id", "summary", "last_change_time", "flags", "creator"],
             "bug_type": "defect",
             "resolution": "---",
         }
@@ -186,15 +174,15 @@ class GeckoTriage(BzCleaner):
         def close():
             params[f"f{utils.get_last_field_num(params)}"] = "CP"
 
-        # Changed since the last run, or waiting on a stale needinfo the agent set.
+        # Changed since the last run, or waiting on a stale needinfo on the reporter.
         # BMO misreads an ISO time with `T` and `Z`, so the time goes in relative.
         # The two flag conditions may match two flags (BMO allows AND_G only on one
-        # field); the agent's preflight checks the stale needinfo exactly.
+        # field); handle_bug checks the stale needinfo exactly.
         group("OR")
         clause("delta_ts", "greaterthan", f"-{since_hours}h")
         group("AND")
         clause("flagtypes.name", "equals", "needinfo?")
-        clause("setters.login_name", "anyexact", ",".join(self.setters))
+        clause("requestees.login_name", "equals", "%reporter%")
         clause("delta_ts", "lessthan", f"-{STALE_NEEDINFO_DAYS}d")
         close()
         close()
@@ -208,7 +196,7 @@ class GeckoTriage(BzCleaner):
         # dedupe key needs is carried over by hand.
         data[str(bug["id"])] = {
             "last_change_time": bug["last_change_time"],
-            "stale": has_stale_bot_needinfo(bug, self.now, self.setters),
+            "stale": has_stale_reporter_needinfo(bug, self.now),
         }
         return bug
 

@@ -9,7 +9,6 @@ import pytest
 from bugbot.hackbot_utils import AgentRun
 from bugbot.rules.gecko_triage import (
     AGENT,
-    HACKBOT_EMAIL,
     STALE_NEEDINFO_DAYS,
     TEAMS,
     GeckoTriage,
@@ -94,16 +93,24 @@ def test_queries_open_defects_only():
     assert params["bug_type"] == "defect"
 
 
-def test_queries_bugs_changed_since_the_last_run_or_on_a_stale_bot_needinfo():
+def test_queries_bugs_changed_since_the_last_run_or_on_a_stale_reporter_needinfo():
     params = _rule().query(6)
     values = _values(params)
     # BMO misreads an ISO time with `T` and `Z`; a relative value has no time zone.
     assert "-6h" in values
-    assert HACKBOT_EMAIL in values
+    assert "needinfo?" in values
     assert f"-{STALE_NEEDINFO_DAYS}d" in values
-    # BMO allows AND_G only on one field, so the two flag conditions are a plain
-    # AND; the agent's preflight checks the stale needinfo exactly.
+    assert "requestees.login_name" in params.values()
+    assert "%reporter%" in values
+    # Who set the needinfo does not matter any more.
+    assert "setters.login_name" not in params.values()
+    # BMO allows AND_G only on one field, so the flag conditions are a plain AND;
+    # handle_bug checks the stale needinfo exactly.
     assert "AND_G" not in params.values()
+
+
+def test_queries_the_reporter():
+    assert "creator" in _rule().query(6)["include_fields"]
 
 
 def test_keeps_a_bot_filed_bug():
@@ -238,24 +245,51 @@ def test_a_failed_run_keeps_the_window_open(tmp_path, monkeypatch):
     assert load_last_run("media") is None
 
 
-def _with_needinfo(bug, setter, when):
-    flag = {"name": "needinfo", "status": "?", "setter": setter, "creation_date": when}
+def _with_needinfo(bug, requestee, when, setter="someone@example.org"):
+    flag = {
+        "name": "needinfo",
+        "status": "?",
+        "setter": setter,
+        "requestee": requestee,
+        "creation_date": when,
+    }
     return dict(bug, flags=[flag])
 
 
-def test_a_stale_bot_needinfo_gets_its_own_key():
-    # The run that set the needinfo already used the bug's current change time.
-    rule = _rule(now=NOW)
-    stale = _with_needinfo(_bug(), HACKBOT_EMAIL, "2026-09-01T10:00:00Z")
+def _stale(bug):
     data: dict = {}
-    rule.handle_bug(stale, data)
-    assert data["1"]["stale"] is True
-    fresh = _with_needinfo(_bug(), HACKBOT_EMAIL, "2026-10-14T10:00:00Z")
-    rule.handle_bug(fresh, data)
-    assert data["1"]["stale"] is False
-    other = _with_needinfo(_bug(), "someone@example.org", "2026-09-01T10:00:00Z")
-    rule.handle_bug(other, data)
-    assert data["1"]["stale"] is False
+    _rule(now=NOW).handle_bug(bug, data)
+    return data[str(bug["id"])]["stale"]
+
+
+@pytest.mark.parametrize(
+    "setter", ["hackbot@mozilla.tld", "dev@mozilla.com", "reporter@example.org"]
+)
+def test_a_stale_reporter_needinfo_set_by_anyone_is_stale(setter):
+    bug = _with_needinfo(
+        _bug(), "Reporter@Example.org", "2026-09-01T10:00:00Z", setter=setter
+    )
+    assert _stale(bug) is True
+
+
+def test_a_stale_needinfo_on_someone_else_is_not_stale():
+    bug = _with_needinfo(_bug(), "dev@mozilla.com", "2026-09-01T10:00:00Z")
+    assert _stale(bug) is False
+
+
+def test_a_fresh_reporter_needinfo_is_not_stale():
+    bug = _with_needinfo(_bug(), "reporter@example.org", "2026-10-14T10:00:00Z")
+    assert _stale(bug) is False
+
+
+def test_an_answered_reporter_needinfo_is_not_stale():
+    bug = _with_needinfo(_bug(), "reporter@example.org", "2026-09-01T10:00:00Z")
+    bug["flags"][0]["status"] = "+"
+    assert _stale(bug) is False
+
+
+def test_a_stale_needinfo_gets_its_own_key():
+    # The run that set the needinfo already used the bug's current change time.
     assert dedupe_key("media", 1, LAST_CHANGE, stale=True).endswith(":stale")
     assert dedupe_key("media", 1, LAST_CHANGE) != dedupe_key(
         "media", 1, LAST_CHANGE, stale=True
@@ -267,27 +301,3 @@ def test_a_stale_bug_is_started_under_the_stale_key(started):
     bugs["1"]["stale"] = True
     _rule(dryrun=False).trigger_runs(bugs)
     assert started[0][2] == dedupe_key("media", 1, LAST_CHANGE, stale=True)
-
-
-def test_bot_setters_add_the_aliases_from_the_environment():
-    from bugbot.rules.gecko_triage import bot_setters
-
-    assert bot_setters({}) == (HACKBOT_EMAIL,)
-    assert bot_setters({"BOT_ALIASES": " Team-Bot@Example.com, ,"}) == (
-        HACKBOT_EMAIL,
-        "team-bot@example.com",
-    )
-
-
-def test_a_stale_needinfo_from_an_alias_is_found(monkeypatch):
-    monkeypatch.setenv("BOT_ALIASES", "team-bot@example.com")
-    rule = _rule(now=NOW)
-    values = _values(rule.query(6))
-    assert f"{HACKBOT_EMAIL},team-bot@example.com" in values
-    stale = _with_needinfo(_bug(), "Team-Bot@Example.com", "2026-09-01T10:00:00Z")
-    data: dict = {}
-    rule.handle_bug(stale, data)
-    assert data["1"]["stale"] is True
-    other = _with_needinfo(_bug(), "someone@example.org", "2026-09-01T10:00:00Z")
-    rule.handle_bug(other, data)
-    assert data["1"]["stale"] is False
