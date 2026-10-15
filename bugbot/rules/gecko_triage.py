@@ -75,11 +75,24 @@ def dedupe_key(
     return f"{key}:stale" if stale else key
 
 
-def has_stale_bot_needinfo(bug: dict, now: datetime) -> bool:
+def bot_setters(env=os.environ) -> tuple[str, ...]:
+    """The accounts whose needinfos are the agent's: hackbot and the `BOT_ALIASES`.
+
+    `BOT_ALIASES` holds comma-separated logins of a temporary account that posted the
+    agent's results, such as a team bot in a pilot. It stays out of the repo, as in the
+    agent (bugbug's agents/gecko-triage config.py).
+    """
+    aliases = (a.strip().lower() for a in env.get("BOT_ALIASES", "").split(","))
+    return (HACKBOT_EMAIL, *(a for a in aliases if a))
+
+
+def has_stale_bot_needinfo(
+    bug: dict, now: datetime, setters: tuple[str, ...] = (HACKBOT_EMAIL,)
+) -> bool:
     for flag in bug.get("flags") or ():
         if flag.get("name") != "needinfo" or flag.get("status") != "?":
             continue
-        if flag.get("setter") != HACKBOT_EMAIL:
+        if str(flag.get("setter", "")).lower() not in setters:
             continue
         set_at = flag.get("creation_date")
         if set_at and now - datetime.fromisoformat(
@@ -138,6 +151,7 @@ class GeckoTriage(BzCleaner):
         self.every_hours = self.get_config("every_hours", 24)
         self.now = datetime.now(timezone.utc)
         self.left_for_next_run = 0
+        self.setters = bot_setters()
 
     def description(self):
         return f"[Using AI] Bugs sent to the gecko-triage agent for the {self.team_name} team"
@@ -180,7 +194,7 @@ class GeckoTriage(BzCleaner):
         clause("delta_ts", "greaterthan", f"-{since_hours}h")
         group("AND")
         clause("flagtypes.name", "equals", "needinfo?")
-        clause("setters.login_name", "equals", HACKBOT_EMAIL)
+        clause("setters.login_name", "anyexact", ",".join(self.setters))
         clause("delta_ts", "lessthan", f"-{STALE_NEEDINFO_DAYS}d")
         close()
         close()
@@ -194,7 +208,7 @@ class GeckoTriage(BzCleaner):
         # dedupe key needs is carried over by hand.
         data[str(bug["id"])] = {
             "last_change_time": bug["last_change_time"],
-            "stale": has_stale_bot_needinfo(bug, self.now),
+            "stale": has_stale_bot_needinfo(bug, self.now, self.setters),
         }
         return bug
 

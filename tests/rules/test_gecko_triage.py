@@ -267,3 +267,24 @@ def test_a_stale_bug_is_started_under_the_stale_key(started):
     bugs["1"]["stale"] = True
     _rule(dryrun=False).trigger_runs(bugs)
     assert started[0][2] == dedupe_key("media", 1, LAST_CHANGE, stale=True)
+
+
+def test_bot_setters_add_the_aliases_from_the_environment():
+    from bugbot.rules.gecko_triage import bot_setters
+
+    assert bot_setters({}) == (HACKBOT_EMAIL,)
+    assert bot_setters({"BOT_ALIASES": " Team-Bot@Example.com, ,"}) == (
+        HACKBOT_EMAIL,
+        "team-bot@example.com",
+    )
+
+
+def test_a_stale_needinfo_from_an_alias_is_found(monkeypatch):
+    monkeypatch.setenv("BOT_ALIASES", "team-bot@example.com")
+    rule = _rule(now=NOW)
+    values = _values(rule.query(6))
+    assert f"{HACKBOT_EMAIL},team-bot@example.com" in values
+    stale = _with_needinfo(_bug(), "team-bot@example.com", "2026-09-01T10:00:00Z")
+    data: dict = {}
+    rule.handle_bug(stale, data)
+    assert data["1"]["stale"] is True
