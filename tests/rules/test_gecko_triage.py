@@ -284,7 +284,10 @@ def test_a_stale_needinfo_from_an_alias_is_found(monkeypatch):
     rule = _rule(now=NOW)
     values = _values(rule.query(6))
     assert f"{HACKBOT_EMAIL},team-bot@example.com" in values
-    stale = _with_needinfo(_bug(), "team-bot@example.com", "2026-09-01T10:00:00Z")
+    stale = _with_needinfo(_bug(), "Team-Bot@Example.com", "2026-09-01T10:00:00Z")
     data: dict = {}
     rule.handle_bug(stale, data)
     assert data["1"]["stale"] is True
+    other = _with_needinfo(_bug(), "someone@example.org", "2026-09-01T10:00:00Z")
+    rule.handle_bug(other, data)
+    assert data["1"]["stale"] is False
