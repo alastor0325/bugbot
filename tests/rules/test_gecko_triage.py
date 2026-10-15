@@ -12,6 +12,7 @@ from bugbot.rules.gecko_triage import (
     STALE_NEEDINFO_DAYS,
     TEAMS,
     GeckoTriage,
+    changed_since,
     dedupe_key,
     hours_since,
     is_due,
@@ -163,6 +164,22 @@ def test_caps_the_number_of_new_runs(started):
     bugs = rule.trigger_runs(_bugs(1, 2, 3))
     assert len(started) == 1 and set(bugs) == {"1"}
     assert rule.left_for_next_run == 2
+
+
+def test_changed_bugs_start_before_stale_needinfos_under_the_cap(started):
+    bugs = _bugs(1, 2, 3)
+    bugs["1"]["changed"] = False
+    bugs["2"]["changed"] = False
+    rule = _rule(dryrun=False, max_triggers=2)
+    started_bugs = rule.trigger_runs(bugs)
+    assert list(started_bugs) == ["3", "1"]
+    assert rule.left_for_next_run == 1
+
+
+def test_changed_since_compares_with_the_window_start():
+    start = datetime(2026, 10, 15, 5, tzinfo=timezone.utc)
+    assert changed_since("2026-10-15T05:00:00Z", start)
+    assert not changed_since("2026-10-15T04:59:59Z", start)
 
 
 def test_a_bug_whose_run_exists_is_not_left_for_next_run(monkeypatch):
@@ -379,3 +396,14 @@ def test_a_stale_bug_is_started_under_the_stale_key(started):
     bugs["1"]["stale"] = True
     _rule(dryrun=False).trigger_runs(bugs)
     assert started[0][2] == dedupe_key("media", 1, LAST_CHANGE, stale=True)
+
+
+def test_handle_bug_marks_a_change_inside_the_interval():
+    rule = _rule(now=NOW)
+    rule.last_run = NOW - timedelta(hours=6)
+    rule.get_bz_params("today")
+    data: dict = {}
+    for bug_id, hours in ((1, 1), (2, 10)):
+        when = (NOW - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rule.handle_bug(dict(_bug(bug_id), last_change_time_non_bot=when), data)
+    assert data["1"]["changed"] and not data["2"]["changed"]

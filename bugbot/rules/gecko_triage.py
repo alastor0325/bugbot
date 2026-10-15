@@ -100,6 +100,19 @@ def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
     return now - newest >= timedelta(days=STALE_NEEDINFO_DAYS)
 
 
+def changed_since(last_change_time: str, start: datetime) -> bool:
+    """Whether a person changed the bug at or after ``start``."""
+    return datetime.fromisoformat(last_change_time.replace("Z", "+00:00")) >= start
+
+
+def changed_first(bugs: dict) -> list[tuple[str, dict]]:
+    """The bugs a person changed in the interval first, in query order, then the rest.
+
+    Under the cap, a new comment must not wait behind old bugs with a stale needinfo.
+    """
+    return sorted(bugs.items(), key=lambda item: not item[1].get("changed", True))
+
+
 def state_path() -> str:
     return os.path.join(
         utils.get_config("common", "cache"), "gecko_triage_last_run.json"
@@ -151,6 +164,7 @@ class GeckoTriage(BzCleaner):
         self.every_hours = self.get_config("every_hours", 24)
         self.now = datetime.now(timezone.utc)
         self.left_for_next_run = 0
+        self.window_start = self.now
 
     def description(self):
         return f"[Using AI] Bugs sent to the gecko-triage agent for the {self.team_name} team"
@@ -207,15 +221,18 @@ class GeckoTriage(BzCleaner):
         return params
 
     def get_bz_params(self, date):
-        return self.query(hours_since(self.last_run, self.now, self.every_hours))
+        since = hours_since(self.last_run, self.now, self.every_hours)
+        self.window_start = self.now - timedelta(hours=since)
+        return self.query(since)
 
     def handle_bug(self, bug, data):
         # `bughandler` rebuilds each row from id and summary, so the field the
         # dedupe key needs is carried over by hand.
+        last_change = bug.get("last_change_time_non_bot") or bug["last_change_time"]
         data[str(bug["id"])] = {
-            "last_change_time": bug.get("last_change_time_non_bot")
-            or bug["last_change_time"],
+            "last_change_time": last_change,
             "stale": has_stale_reporter_needinfo(bug, self.now),
+            "changed": changed_since(last_change, self.window_start),
         }
         return bug
 
@@ -259,7 +276,7 @@ class GeckoTriage(BzCleaner):
 
         started: dict = {}
         failed = 0
-        items = list(bugs.items())
+        items = changed_first(bugs)
         for index, (bugid, bug) in enumerate(items):
             if len(started) >= self.max_triggers:
                 logger.warning(
