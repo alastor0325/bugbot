@@ -74,8 +74,12 @@ def dedupe_key(
 
 def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
     """Whether the bug waits only on its reporter, as the agent's INCOMPLETE rule
-    needs: at least one open needinfo, every one on the reporter and none self-set,
-    and the oldest at least STALE_NEEDINFO_DAYS old, whoever set it."""
+    needs: at least one open needinfo, every one on the reporter, none self-set or
+    undated, and the newest at least STALE_NEEDINFO_DAYS old, whoever set it.
+
+    The agent also restarts the clock at a later comment by the reporter; the flags
+    cannot show that, so the agent checks it.
+    """
     reporter = str(bug.get("creator", "")).lower()
     open_needinfos = [
         flag
@@ -92,8 +96,8 @@ def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
     dates = [flag.get("creation_date") for flag in open_needinfos]
     if not all(dates):
         return False
-    oldest = min(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in dates)
-    return now - oldest >= timedelta(days=STALE_NEEDINFO_DAYS)
+    newest = max(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in dates)
+    return now - newest >= timedelta(days=STALE_NEEDINFO_DAYS)
 
 
 def state_path() -> str:

@@ -317,12 +317,24 @@ def test_a_self_set_reporter_needinfo_is_not_stale():
     assert _stale(bug) is False
 
 
-def test_the_oldest_reporter_needinfo_decides():
+def test_a_fresh_second_reporter_needinfo_is_not_stale():
+    # The agent's clock starts at the newest open needinfo on the reporter.
     bug = dict(
         _bug(),
         flags=[
-            _needinfo("reporter@example.org", "2026-10-14T10:00:00Z"),
             _needinfo("reporter@example.org", "2026-09-01T10:00:00Z"),
+            _needinfo("reporter@example.org", "2026-10-14T10:00:00Z"),
+        ],
+    )
+    assert _stale(bug) is False
+
+
+def test_two_stale_reporter_needinfos_are_stale():
+    bug = dict(
+        _bug(),
+        flags=[
+            _needinfo("reporter@example.org", "2026-09-01T10:00:00Z"),
+            _needinfo("reporter@example.org", "2026-09-20T10:00:00Z"),
         ],
     )
     assert _stale(bug) is True
