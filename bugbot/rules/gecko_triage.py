@@ -73,22 +73,27 @@ def dedupe_key(
 
 
 def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
-    """Whether the bug has an open needinfo on its reporter older than
-    STALE_NEEDINFO_DAYS, whoever set it."""
+    """Whether the bug waits only on its reporter, as the agent's INCOMPLETE rule
+    needs: at least one open needinfo, every one on the reporter and none self-set,
+    and the oldest at least STALE_NEEDINFO_DAYS old, whoever set it."""
     reporter = str(bug.get("creator", "")).lower()
-    if not reporter:
+    open_needinfos = [
+        flag
+        for flag in bug.get("flags") or ()
+        if flag.get("name") == "needinfo" and flag.get("status") == "?"
+    ]
+    if not reporter or not open_needinfos:
         return False
-    for flag in bug.get("flags") or ():
-        if flag.get("name") != "needinfo" or flag.get("status") != "?":
-            continue
+    for flag in open_needinfos:
         if str(flag.get("requestee", "")).lower() != reporter:
-            continue
-        set_at = flag.get("creation_date")
-        if set_at and now - datetime.fromisoformat(
-            set_at.replace("Z", "+00:00")
-        ) >= timedelta(days=STALE_NEEDINFO_DAYS):
-            return True
-    return False
+            return False
+        if str(flag.get("setter", "")).lower() == reporter:
+            return False
+    dates = [flag.get("creation_date") for flag in open_needinfos]
+    if not all(dates):
+        return False
+    oldest = min(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in dates)
+    return now - oldest >= timedelta(days=STALE_NEEDINFO_DAYS)
 
 
 def state_path() -> str:
@@ -122,9 +127,11 @@ class GeckoTriage(BzCleaner):
     """Ask hackbot's gecko-triage agent to triage one team's bugs.
 
     Runs from the hourly cron but acts only when `every_hours` (configs/rules.json)
-    have passed since its last run. It then picks the open defects in the
-    team's components that changed since that run, or that wait on a needinfo on the
-    reporter that has gone stale, whoever set it. The dedupe key keeps one run per state of a bug.
+    have passed since its last run. It then picks the open defects in the team's
+    components that changed since that run, or that wait on a needinfo on the
+    reporter that has gone stale, whoever set it. The dedupe key keeps one run per
+    state of a bug, and uses the last change by a person so that a change by BugBot
+    alone starts no new run.
 
     The agent's own comment also changes the bug, so the next interval picks the bug
     again; the agent's preflight then ends that run at no model cost.
@@ -155,7 +162,14 @@ class GeckoTriage(BzCleaner):
 
     def query(self, since_hours: int) -> dict:
         params = {
-            "include_fields": ["id", "summary", "last_change_time", "flags", "creator"],
+            "include_fields": [
+                "id",
+                "summary",
+                "last_change_time",
+                "last_change_time_non_bot",
+                "flags",
+                "creator",
+            ],
             "bug_type": "defect",
             "resolution": "---",
         }
@@ -195,7 +209,8 @@ class GeckoTriage(BzCleaner):
         # `bughandler` rebuilds each row from id and summary, so the field the
         # dedupe key needs is carried over by hand.
         data[str(bug["id"])] = {
-            "last_change_time": bug["last_change_time"],
+            "last_change_time": bug.get("last_change_time_non_bot")
+            or bug["last_change_time"],
             "stale": has_stale_reporter_needinfo(bug, self.now),
         }
         return bug

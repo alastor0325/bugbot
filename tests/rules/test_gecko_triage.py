@@ -262,9 +262,7 @@ def _stale(bug):
     return data[str(bug["id"])]["stale"]
 
 
-@pytest.mark.parametrize(
-    "setter", ["hackbot@mozilla.tld", "dev@mozilla.com", "reporter@example.org"]
-)
+@pytest.mark.parametrize("setter", ["hackbot@mozilla.tld", "dev@mozilla.com"])
 def test_a_stale_reporter_needinfo_set_by_anyone_is_stale(setter):
     bug = _with_needinfo(
         _bug(), "Reporter@Example.org", "2026-09-01T10:00:00Z", setter=setter
@@ -286,6 +284,74 @@ def test_an_answered_reporter_needinfo_is_not_stale():
     bug = _with_needinfo(_bug(), "reporter@example.org", "2026-09-01T10:00:00Z")
     bug["flags"][0]["status"] = "+"
     assert _stale(bug) is False
+
+
+def _needinfo(requestee, when, setter="someone@example.org"):
+    return {
+        "name": "needinfo",
+        "status": "?",
+        "setter": setter,
+        "requestee": requestee,
+        "creation_date": when,
+    }
+
+
+def test_an_open_needinfo_on_someone_else_too_is_not_stale():
+    bug = dict(
+        _bug(),
+        flags=[
+            _needinfo("reporter@example.org", "2026-09-01T10:00:00Z"),
+            _needinfo("dev@mozilla.com", "2026-10-14T10:00:00Z"),
+        ],
+    )
+    assert _stale(bug) is False
+
+
+def test_a_self_set_reporter_needinfo_is_not_stale():
+    bug = _with_needinfo(
+        _bug(),
+        "reporter@example.org",
+        "2026-09-01T10:00:00Z",
+        setter="Reporter@Example.org",
+    )
+    assert _stale(bug) is False
+
+
+def test_the_oldest_reporter_needinfo_decides():
+    bug = dict(
+        _bug(),
+        flags=[
+            _needinfo("reporter@example.org", "2026-10-14T10:00:00Z"),
+            _needinfo("reporter@example.org", "2026-09-01T10:00:00Z"),
+        ],
+    )
+    assert _stale(bug) is True
+
+
+def test_a_bot_only_change_keeps_the_key(started):
+    # BugBot's own field changes move only last_change_time, so they must not
+    # start a new model run.
+    rule = _rule(dryrun=False, now=NOW)
+    keys = []
+    for last_change in (LAST_CHANGE, "2026-10-15T12:00:00Z"):
+        data: dict = {}
+        bug = dict(
+            _bug(), last_change_time=last_change, last_change_time_non_bot=LAST_CHANGE
+        )
+        rule.handle_bug(bug, data)
+        rule.trigger_runs({"1": dict(bug, **data["1"])})
+        keys.append(started[-1][2])
+    assert keys[0] == keys[1] == dedupe_key("media", 1, LAST_CHANGE)
+
+
+def test_the_key_falls_back_to_last_change_time():
+    data: dict = {}
+    _rule(now=NOW).handle_bug(_bug(), data)
+    assert data["1"]["last_change_time"] == LAST_CHANGE
+
+
+def test_queries_the_non_bot_change_time():
+    assert "last_change_time_non_bot" in _rule().query(6)["include_fields"]
 
 
 def test_a_stale_needinfo_gets_its_own_key():
