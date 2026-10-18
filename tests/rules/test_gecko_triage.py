@@ -9,6 +9,7 @@ import pytest
 from bugbot.hackbot_utils import AgentRun
 from bugbot.rules.gecko_triage import (
     AGENT,
+    MAX_STALE_NEEDINFO_DAYS,
     STALE_NEEDINFO_DAYS,
     TEAMS,
     GeckoTriage,
@@ -101,6 +102,8 @@ def test_queries_bugs_changed_since_the_last_run_or_on_a_stale_reporter_needinfo
     assert "-6h" in values
     assert "needinfo?" in values
     assert f"-{STALE_NEEDINFO_DAYS}d" in values
+    # An old bug with no recent activity is left alone.
+    assert f"-{MAX_STALE_NEEDINFO_DAYS}d" in values
     assert "requestees.login_name" in params.values()
     assert "%reporter%" in values
     # Who set the needinfo does not matter any more.
@@ -168,8 +171,8 @@ def test_caps_the_number_of_new_runs(started):
 
 def test_changed_bugs_start_before_stale_needinfos_under_the_cap(started):
     bugs = _bugs(1, 2, 3)
-    bugs["1"]["changed"] = False
-    bugs["2"]["changed"] = False
+    bugs["1"].update(changed=False, stale=True)
+    bugs["2"].update(changed=False, stale=True)
     rule = _rule(dryrun=False, max_triggers=2)
     started_bugs = rule.trigger_runs(bugs)
     assert list(started_bugs) == ["3", "1"]
@@ -292,6 +295,39 @@ def test_a_stale_needinfo_on_someone_else_is_not_stale():
     assert _stale(bug) is False
 
 
+def test_a_bot_only_change_after_the_window_start_starts_no_run(started):
+    rule = _rule(dryrun=False, now=NOW)
+    rule.window_start = NOW - timedelta(hours=2)
+    data: dict = {}
+    bug = dict(
+        _bug(),
+        last_change_time="2026-10-15T13:00:00Z",
+        last_change_time_non_bot=LAST_CHANGE,
+    )
+    rule.handle_bug(bug, data)
+    assert rule.trigger_runs({"1": dict(bug, **data["1"])}) == {}
+    assert started == []
+
+
+def test_a_reporter_needinfo_older_than_the_limit_is_not_stale():
+    # NOW is 2026-10-15; 61 days back is 2026-08-15.
+    bug = _with_needinfo(_bug(), "reporter@example.org", "2026-08-14T10:00:00Z")
+    assert _stale(bug) is False
+
+
+def test_a_reporter_needinfo_at_the_limit_is_stale():
+    bug = _with_needinfo(_bug(), "reporter@example.org", "2026-08-16T13:30:00Z")
+    assert _stale(bug) is True
+
+
+def test_a_bug_that_is_neither_changed_nor_stale_starts_no_run(started):
+    bugs = _bugs(1, 2, 3)
+    bugs["1"].update(changed=False, stale=False)
+    bugs["2"].update(changed=False, stale=True)
+    started_bugs = _rule(dryrun=False).trigger_runs(bugs)
+    assert set(started_bugs) == {"2", "3"}
+
+
 def test_a_fresh_reporter_needinfo_is_not_stale():
     bug = _with_needinfo(_bug(), "reporter@example.org", "2026-10-14T10:00:00Z")
     assert _stale(bug) is False
@@ -361,6 +397,7 @@ def test_a_bot_only_change_keeps_the_key(started):
     # BugBot's own field changes move only last_change_time, so they must not
     # start a new model run.
     rule = _rule(dryrun=False, now=NOW)
+    rule.window_start = datetime.fromisoformat(LAST_CHANGE.replace("Z", "+00:00"))
     keys = []
     for last_change in (LAST_CHANGE, "2026-10-15T12:00:00Z"):
         data: dict = {}

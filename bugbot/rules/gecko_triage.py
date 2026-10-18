@@ -18,6 +18,10 @@ AGENT = "gecko-triage"
 # agent uses the same value (bugbug's agents/gecko-triage config.py).
 STALE_NEEDINFO_DAYS = 14
 
+# A reporter needinfo older than this is not followed: an old bug with no recent activity
+# is left alone, so the agent only closes asks that are part of current triage.
+MAX_STALE_NEEDINFO_DAYS = 60
+
 
 @dataclass(frozen=True)
 class Team:
@@ -75,7 +79,8 @@ def dedupe_key(
 def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
     """Whether the bug waits only on its reporter, as the agent's INCOMPLETE rule
     needs: at least one open needinfo, every one on the reporter, none self-set or
-    undated, and the newest at least STALE_NEEDINFO_DAYS old, whoever set it.
+    undated, and the newest between STALE_NEEDINFO_DAYS and MAX_STALE_NEEDINFO_DAYS old,
+    whoever set it.
 
     The agent also restarts the clock at a later comment by the reporter; the flags
     cannot show that, so the agent checks it.
@@ -97,7 +102,12 @@ def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
     if not all(dates):
         return False
     newest = max(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in dates)
-    return now - newest >= timedelta(days=STALE_NEEDINFO_DAYS)
+    age = now - newest
+    return (
+        timedelta(days=STALE_NEEDINFO_DAYS)
+        <= age
+        <= timedelta(days=MAX_STALE_NEEDINFO_DAYS)
+    )
 
 
 def changed_since(last_change_time: str, start: datetime) -> bool:
@@ -216,6 +226,7 @@ class GeckoTriage(BzCleaner):
         clause("flagtypes.name", "equals", "needinfo?")
         clause("requestees.login_name", "equals", "%reporter%")
         clause("delta_ts", "lessthan", f"-{STALE_NEEDINFO_DAYS}d")
+        clause("delta_ts", "greaterthan", f"-{MAX_STALE_NEEDINFO_DAYS}d")
         close()
         close()
         return params
@@ -276,7 +287,13 @@ class GeckoTriage(BzCleaner):
 
         started: dict = {}
         failed = 0
-        items = changed_first(bugs)
+        # The query also returns bugs that a bot changed, or whose needinfo is too old;
+        # handle_bug marks both, and they start no run.
+        items = [
+            item
+            for item in changed_first(bugs)
+            if item[1].get("changed", True) or item[1].get("stale", False)
+        ]
         for index, (bugid, bug) in enumerate(items):
             if len(started) >= self.max_triggers:
                 logger.warning(
