@@ -497,3 +497,14 @@ def test_an_ask_gets_its_own_key_and_a_later_change_still_runs(started):
     bugs["1"]["asked"] = ASKED
     _rule(dryrun=False).trigger_runs(bugs)
     assert started[0][2] == key
+
+
+def test_asked_at_ignores_a_needinfo_that_a_bot_set():
+    for setter in (
+        AGENT_LOGIN,
+        "release-mgmt-account-bot@mozilla.tld",
+        "x@mozilla.bugs",
+        "",
+    ):
+        bug = _with_needinfo(_bug(), AGENT_LOGIN, ASKED, setter=setter)
+        assert asked_at(bug, [AGENT_LOGIN]) is None

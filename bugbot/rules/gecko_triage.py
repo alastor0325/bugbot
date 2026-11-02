@@ -22,6 +22,10 @@ STALE_NEEDINFO_DAYS = 14
 # is left alone, so the agent only closes asks that are part of current triage.
 MAX_STALE_NEEDINFO_DAYS = 60
 
+# A setter with one of these suffixes is a BMO automation account, not a person. The
+# agent uses the same value (bugbug's agents/gecko-triage state.py).
+BOT_SUFFIXES = (".tld", ".bugs")
+
 
 @dataclass(frozen=True)
 class Team:
@@ -75,8 +79,9 @@ def dedupe_key(
 
     A stale needinfo is a new state with no new change time (the run that set the
     needinfo already used it), so it gets its own key. A needinfo on the agent adds
-    the time of the ask, so each ask gets a run. The agent cannot clear that flag, so
-    the change time stays in the key: a later change still gets its run.
+    the time of the ask, so each ask gets a run. The flag stays open until the agent's
+    answer is applied, so the change time stays in the key: a later change still gets
+    its run.
     """
     key = f"{AGENT}:{team}:{bug_id}:{last_change_time}"
     if asked:
@@ -84,10 +89,17 @@ def dedupe_key(
     return f"{key}:stale" if stale else key
 
 
+def is_person(login: str, agent_logins: set[str]) -> bool:
+    """Not the agent and not a BMO automation account, as the agent judges a setter."""
+    return (
+        bool(login) and login not in agent_logins and not login.endswith(BOT_SUFFIXES)
+    )
+
+
 def asked_at(bug: dict, agent_logins: list[str]) -> str | None:
     """When the newest open needinfo on the agent was set, or None when none is open.
 
-    A needinfo on the agent asks for a run, whoever owns the bug.
+    A needinfo that a person set on the agent asks for a run, whoever owns the bug.
     """
     logins = {login.lower() for login in agent_logins}
     dates = [
@@ -96,6 +108,7 @@ def asked_at(bug: dict, agent_logins: list[str]) -> str | None:
         if flag.get("name") == "needinfo"
         and flag.get("status") == "?"
         and str(flag.get("requestee", "")).lower() in logins
+        and is_person(str(flag.get("setter", "")).lower(), logins)
     ]
     return max((d for d in dates if d), default=None)
 
