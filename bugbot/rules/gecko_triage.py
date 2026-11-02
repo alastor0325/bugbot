@@ -64,16 +64,39 @@ def hours_since(last_run: datetime | None, now: datetime, every_hours: int) -> i
 
 
 def dedupe_key(
-    team: str, bug_id: int, last_change_time: str, stale: bool = False
+    team: str,
+    bug_id: int,
+    last_change_time: str,
+    stale: bool = False,
+    asked: str | None = None,
 ) -> str:
     """One run per state of a bug: a bug that has not changed since its last run is
     not run again, however often the query returns it.
 
     A stale needinfo is a new state with no new change time (the run that set the
-    needinfo already used it), so it gets its own key.
+    needinfo already used it), so it gets its own key. A needinfo on the agent gets
+    one run per ask, keyed by the time of the ask.
     """
+    if asked:
+        return f"{AGENT}:{team}:{bug_id}:asked:{asked}"
     key = f"{AGENT}:{team}:{bug_id}:{last_change_time}"
     return f"{key}:stale" if stale else key
+
+
+def asked_at(bug: dict, agent_logins: list[str]) -> str | None:
+    """When the newest open needinfo on the agent was set, or None when none is open.
+
+    A needinfo on the agent asks for a run, whoever owns the bug.
+    """
+    logins = {login.lower() for login in agent_logins}
+    dates = [
+        flag.get("creation_date")
+        for flag in bug.get("flags") or ()
+        if flag.get("name") == "needinfo"
+        and flag.get("status") == "?"
+        and str(flag.get("requestee", "")).lower() in logins
+    ]
+    return max((d for d in dates if d), default=None)
 
 
 def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
@@ -116,11 +139,18 @@ def changed_since(last_change_time: str, start: datetime) -> bool:
 
 
 def changed_first(bugs: dict) -> list[tuple[str, dict]]:
-    """The bugs a person changed in the interval first, in query order, then the rest.
+    """The bugs that ask the agent first, then the bugs a person changed in the
+    interval, in query order, then the rest.
 
     Under the cap, a new comment must not wait behind old bugs with a stale needinfo.
     """
-    return sorted(bugs.items(), key=lambda item: not item[1].get("changed", True))
+    return sorted(
+        bugs.items(),
+        key=lambda item: (
+            not item[1].get("asked"),
+            not item[1].get("changed", True),
+        ),
+    )
 
 
 def state_path() -> str:
@@ -156,7 +186,8 @@ class GeckoTriage(BzCleaner):
     Runs from the hourly cron but acts only when `every_hours` (configs/rules.json)
     have passed since its last run. It then picks the open defects in the team's
     components that changed since that run, or that wait on a needinfo on the
-    reporter that has gone stale, whoever set it. The dedupe key keeps one run per
+    reporter that has gone stale, whoever set it, or that ask the agent with a needinfo
+    on one of `agent_logins`. Those start first. The dedupe key keeps one run per
     state of a bug, and uses the last change by a person so that a change by BugBot
     alone starts no new run.
 
@@ -172,6 +203,7 @@ class GeckoTriage(BzCleaner):
         super().__init__()
         self.max_triggers = self.get_config("max_triggers", 20)
         self.every_hours = self.get_config("every_hours", 24)
+        self.agent_logins = self.get_config("agent_logins", ["hackbot@mozilla.tld"])
         self.now = datetime.now(timezone.utc)
         self.left_for_next_run = 0
         self.window_start = self.now
@@ -216,7 +248,8 @@ class GeckoTriage(BzCleaner):
         def close():
             params[f"f{utils.get_last_field_num(params)}"] = "CP"
 
-        # Changed since the last run, or waiting on a stale needinfo on the reporter.
+        # Changed since the last run, waiting on a stale needinfo on the reporter, or
+        # asking the agent with a needinfo.
         # BMO misreads an ISO time with `T` and `Z`, so the time goes in relative.
         # The two flag conditions may match two flags (BMO allows AND_G only on one
         # field); handle_bug checks the stale needinfo exactly.
@@ -227,6 +260,10 @@ class GeckoTriage(BzCleaner):
         clause("requestees.login_name", "equals", "%reporter%")
         clause("delta_ts", "lessthan", f"-{STALE_NEEDINFO_DAYS}d")
         clause("delta_ts", "greaterthan", f"-{MAX_STALE_NEEDINFO_DAYS}d")
+        close()
+        group("AND")
+        clause("flagtypes.name", "equals", "needinfo?")
+        clause("requestees.login_name", "anyexact", ",".join(self.agent_logins))
         close()
         close()
         return params
@@ -244,6 +281,7 @@ class GeckoTriage(BzCleaner):
             "last_change_time": last_change,
             "stale": has_stale_reporter_needinfo(bug, self.now),
             "changed": changed_since(last_change, self.window_start),
+            "asked": asked_at(bug, self.agent_logins),
         }
         return bug
 
@@ -292,7 +330,9 @@ class GeckoTriage(BzCleaner):
         items = [
             item
             for item in changed_first(bugs)
-            if item[1].get("changed", True) or item[1].get("stale", False)
+            if item[1].get("changed", True)
+            or item[1].get("stale", False)
+            or item[1].get("asked")
         ]
         for index, (bugid, bug) in enumerate(items):
             if len(started) >= self.max_triggers:
@@ -308,6 +348,7 @@ class GeckoTriage(BzCleaner):
                 int(bugid),
                 bug["last_change_time"],
                 stale=bug.get("stale", False),
+                asked=bug.get("asked"),
             )
             try:
                 run = start_or_retry_agent_run(

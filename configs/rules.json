@@ -427,7 +427,8 @@
   "gecko_triage": {
     "max_days_in_cache": 0,
     "max_triggers": 20,
-    "every_hours": 24
+    "every_hours": 24,
+    "agent_logins": ["hackbot@mozilla.tld"]
   },
   "performancebug": {
     "max_days_in_cache": 7,

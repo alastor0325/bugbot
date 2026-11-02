@@ -13,6 +13,7 @@ from bugbot.rules.gecko_triage import (
     STALE_NEEDINFO_DAYS,
     TEAMS,
     GeckoTriage,
+    asked_at,
     changed_since,
     dedupe_key,
     hours_since,
@@ -444,3 +445,53 @@ def test_handle_bug_marks_a_change_inside_the_interval():
         when = (NOW - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         rule.handle_bug(dict(_bug(bug_id), last_change_time_non_bot=when), data)
     assert data["1"]["changed"] and not data["2"]["changed"]
+
+
+# --- a needinfo on the agent asks for a run ------------------------------------ #
+
+AGENT_LOGIN = "hackbot@mozilla.tld"
+ASKED = "2026-10-15T09:00:00Z"
+
+
+def test_the_agent_logins_come_from_the_rule_config():
+    assert _rule().agent_logins == [AGENT_LOGIN]
+
+
+def test_queries_a_needinfo_on_the_agent():
+    values = _values(_rule().query(6))
+    assert AGENT_LOGIN in values
+
+
+def test_asked_at_is_the_newest_open_needinfo_on_the_agent():
+    bug = _with_needinfo(_bug(), "Hackbot@Mozilla.tld", ASKED)
+    assert asked_at(bug, [AGENT_LOGIN]) == ASKED
+    assert (
+        asked_at(_with_needinfo(_bug(), "dev@mozilla.com", ASKED), [AGENT_LOGIN])
+        is None
+    )
+    closed = dict(bug, flags=[dict(bug["flags"][0], status="+")])
+    assert asked_at(closed, [AGENT_LOGIN]) is None
+
+
+def test_handle_bug_marks_an_ask():
+    data: dict = {}
+    _rule(now=NOW).handle_bug(_with_needinfo(_bug(), AGENT_LOGIN, ASKED), data)
+    assert data["1"]["asked"] == ASKED
+
+
+def test_an_asked_bug_starts_first_and_even_when_nothing_changed(started):
+    bugs = _bugs(1, 2, 3)
+    bugs["3"].update(changed=False, stale=False, asked=ASKED)
+    bugs["2"].update(changed=False, stale=False)
+    started_bugs = _rule(dryrun=False, max_triggers=2).trigger_runs(bugs)
+    assert list(started_bugs) == ["3", "1"]
+
+
+def test_an_ask_gets_one_key_whatever_changes_after_it(started):
+    key = dedupe_key("media", 1, LAST_CHANGE, asked=ASKED)
+    assert key == dedupe_key("media", 1, "2026-10-15T12:00:00Z", asked=ASKED)
+    assert key != dedupe_key("media", 1, LAST_CHANGE)
+    bugs = _bugs(1)
+    bugs["1"]["asked"] = ASKED
+    _rule(dryrun=False).trigger_runs(bugs)
+    assert started[0][2] == key
