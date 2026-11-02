@@ -74,12 +74,13 @@ def dedupe_key(
     not run again, however often the query returns it.
 
     A stale needinfo is a new state with no new change time (the run that set the
-    needinfo already used it), so it gets its own key. A needinfo on the agent gets
-    one run per ask, keyed by the time of the ask.
+    needinfo already used it), so it gets its own key. A needinfo on the agent adds
+    the time of the ask, so each ask gets a run. The agent cannot clear that flag, so
+    the change time stays in the key: a later change still gets its run.
     """
-    if asked:
-        return f"{AGENT}:{team}:{bug_id}:asked:{asked}"
     key = f"{AGENT}:{team}:{bug_id}:{last_change_time}"
+    if asked:
+        key = f"{key}:asked:{asked}"
     return f"{key}:stale" if stale else key
 
 

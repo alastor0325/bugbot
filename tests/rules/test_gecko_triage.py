@@ -487,10 +487,12 @@ def test_an_asked_bug_starts_first_and_even_when_nothing_changed(started):
     assert list(started_bugs) == ["3", "1"]
 
 
-def test_an_ask_gets_one_key_whatever_changes_after_it(started):
+def test_an_ask_gets_its_own_key_and_a_later_change_still_runs(started):
     key = dedupe_key("media", 1, LAST_CHANGE, asked=ASKED)
-    assert key == dedupe_key("media", 1, "2026-10-15T12:00:00Z", asked=ASKED)
+    assert key == dedupe_key("media", 1, LAST_CHANGE, asked=ASKED)
     assert key != dedupe_key("media", 1, LAST_CHANGE)
+    assert key != dedupe_key("media", 1, LAST_CHANGE, asked="2026-10-15T11:00:00Z")
+    assert key != dedupe_key("media", 1, "2026-10-15T12:00:00Z", asked=ASKED)
     bugs = _bugs(1)
     bugs["1"]["asked"] = ASKED
     _rule(dryrun=False).trigger_runs(bugs)
