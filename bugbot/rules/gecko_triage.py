@@ -22,10 +22,6 @@ STALE_NEEDINFO_DAYS = 14
 # is left alone, so the agent only closes asks that are part of current triage.
 MAX_STALE_NEEDINFO_DAYS = 60
 
-# A setter with one of these suffixes is a BMO automation account, not a person. The
-# agent uses the same value (bugbug's agents/gecko-triage state.py).
-BOT_SUFFIXES = (".tld", ".bugs")
-
 
 @dataclass(frozen=True)
 class Team:
@@ -89,11 +85,12 @@ def dedupe_key(
     return f"{key}:stale" if stale else key
 
 
-def is_person(login: str, agent_logins: set[str]) -> bool:
-    """Not the agent and not a BMO automation account, as the agent judges a setter."""
-    return (
-        bool(login) and login not in agent_logins and not login.endswith(BOT_SUFFIXES)
-    )
+def open_needinfos(bug: dict) -> list[dict]:
+    return [
+        flag
+        for flag in bug.get("flags") or ()
+        if flag.get("name") == "needinfo" and flag.get("status") == "?"
+    ]
 
 
 def asked_at(bug: dict, agent_logins: list[str]) -> str | None:
@@ -102,15 +99,18 @@ def asked_at(bug: dict, agent_logins: list[str]) -> str | None:
     A needinfo that a person set on the agent asks for a run, whoever owns the bug.
     """
     logins = {login.lower() for login in agent_logins}
-    dates = [
-        flag.get("creation_date")
-        for flag in bug.get("flags") or ()
-        if flag.get("name") == "needinfo"
-        and flag.get("status") == "?"
-        and str(flag.get("requestee", "")).lower() in logins
-        and is_person(str(flag.get("setter", "")).lower(), logins)
-    ]
-    return max((d for d in dates if d), default=None)
+    dates = []
+    for flag in open_needinfos(bug):
+        setter = str(flag.get("setter", "")).lower()
+        if (
+            str(flag.get("requestee", "")).lower() in logins
+            and setter
+            and setter not in logins
+            and not utils.is_bot_email(setter)
+            and flag.get("creation_date")
+        ):
+            dates.append(flag["creation_date"])
+    return max(dates, default=None)
 
 
 def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
@@ -123,19 +123,15 @@ def has_stale_reporter_needinfo(bug: dict, now: datetime) -> bool:
     cannot show that, so the agent checks it.
     """
     reporter = str(bug.get("creator", "")).lower()
-    open_needinfos = [
-        flag
-        for flag in bug.get("flags") or ()
-        if flag.get("name") == "needinfo" and flag.get("status") == "?"
-    ]
-    if not reporter or not open_needinfos:
+    needinfos = open_needinfos(bug)
+    if not reporter or not needinfos:
         return False
-    for flag in open_needinfos:
+    for flag in needinfos:
         if str(flag.get("requestee", "")).lower() != reporter:
             return False
         if str(flag.get("setter", "")).lower() == reporter:
             return False
-    dates = [flag.get("creation_date") for flag in open_needinfos]
+    dates = [str(flag.get("creation_date") or "") for flag in needinfos]
     if not all(dates):
         return False
     newest = max(datetime.fromisoformat(d.replace("Z", "+00:00")) for d in dates)

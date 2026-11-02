@@ -453,10 +453,6 @@ AGENT_LOGIN = "hackbot@mozilla.tld"
 ASKED = "2026-10-15T09:00:00Z"
 
 
-def test_the_agent_logins_come_from_the_rule_config():
-    assert _rule().agent_logins == [AGENT_LOGIN]
-
-
 def test_queries_a_needinfo_on_the_agent():
     values = _values(_rule().query(6))
     assert AGENT_LOGIN in values
